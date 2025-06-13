@@ -22,11 +22,38 @@ const parser = new Parser({
   }
 });
 
-// Initialize Supabase
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY
-);
+// Initialize Supabase with trimmed keys to handle potential whitespace issues
+const supabaseUrl = process.env.SUPABASE_URL?.trim();
+const supabaseKey = (process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY)?.trim();
+
+// Debug logging for production troubleshooting
+console.log('Supabase Environment Check:');
+console.log('- URL present:', !!supabaseUrl);
+console.log('- Key present:', !!supabaseKey);
+console.log('- Original URL length:', process.env.SUPABASE_URL?.length || 0);
+console.log('- Trimmed URL length:', supabaseUrl?.length || 0);
+console.log('- Original key length:', (process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY)?.length || 0);
+console.log('- Trimmed key length:', supabaseKey?.length || 0);
+
+// Validate environment variables
+if (!supabaseUrl || !supabaseKey) {
+  console.error('Missing required Supabase environment variables');
+  console.error('SUPABASE_URL:', supabaseUrl ? 'Present' : 'Missing');
+  console.error('SUPABASE_ANON_KEY:', supabaseKey ? 'Present' : 'Missing');
+  process.exit(1);
+}
+
+try {
+  const supabase = createClient(supabaseUrl, supabaseKey);
+  console.log('✅ Supabase client initialized successfully');
+} catch (error) {
+  console.error('❌ Failed to initialize Supabase client:', error.message);
+  console.error('URL:', JSON.stringify(supabaseUrl));
+  console.error('Key (first 50 chars):', JSON.stringify(supabaseKey.substring(0, 50)));
+  process.exit(1);
+}
+
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 // Middleware
 app.use(cors({
@@ -350,6 +377,469 @@ app.get('/api/analytics/dashboard', authenticateAPI, async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching dashboard metrics:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ======= MISSION CONTROL MULTI-TENANT API ENDPOINTS =======
+
+// Multi-tenant middleware - extracts client_id from header or query
+const getClientContext = async (req, res, next) => {
+  try {
+    const clientId = req.headers['x-client-id'] || req.query.client_id;
+    
+    if (!clientId) {
+      return res.status(400).json({ error: 'Client ID is required' });
+    }
+    
+    // Verify client exists and is active
+    const { data: client, error } = await supabase
+      .from('clients')
+      .select('*, agencies(*)')
+      .eq('id', clientId)
+      .eq('status', 'active')
+      .single();
+    
+    if (error || !client) {
+      return res.status(404).json({ error: 'Client not found or inactive' });
+    }
+    
+    req.client = client;
+    next();
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// Agency Management Endpoints
+app.get('/api/agencies', authenticateAPI, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('agencies')
+      .select('*')
+      .order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/agencies/:id/clients', authenticateAPI, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('clients')
+      .select('*, client_services(*)')
+      .eq('agency_id', req.params.id)
+      .order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Client Management Endpoints
+app.post('/api/clients', authenticateAPI, async (req, res) => {
+  try {
+    const clientData = req.body;
+    
+    const { data, error } = await supabase
+      .from('clients')
+      .insert([clientData])
+      .select()
+      .single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/clients/:id', authenticateAPI, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('clients')
+      .select('*, agencies(*), client_services(*)')
+      .eq('id', req.params.id)
+      .single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/clients/:id', authenticateAPI, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('clients')
+      .update(req.body)
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Chatbot Management Endpoints
+app.get('/api/chatbots', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('chatbots')
+      .select('*')
+      .eq('client_id', req.client.id)
+      .order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/chatbots', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const chatbotData = {
+      ...req.body,
+      client_id: req.client.id
+    };
+    
+    const { data, error } = await supabase
+      .from('chatbots')
+      .insert([chatbotData])
+      .select()
+      .single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/chatbots/:id', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('chatbots')
+      .select('*')
+      .eq('id', req.params.id)
+      .eq('client_id', req.client.id)
+      .single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Public chatbot endpoints (for embedding)
+app.post('/api/public/chatbots/:id/chat', async (req, res) => {
+  try {
+    const { message, visitor_id, conversation_id } = req.body;
+    
+    // Get chatbot configuration
+    const { data: chatbot, error: chatbotError } = await supabase
+      .from('chatbots')
+      .select('*, clients(*)')
+      .eq('id', req.params.id)
+      .eq('is_active', true)
+      .single();
+    
+    if (chatbotError || !chatbot) {
+      return res.status(404).json({ error: 'Chatbot not found' });
+    }
+    
+    // Log usage
+    await supabase.from('usage_logs').insert({
+      client_id: chatbot.client_id,
+      service_type: 'chatbot',
+      action: 'chat_message',
+      quantity: 1,
+      metadata: { chatbot_id: chatbot.id, visitor_id }
+    });
+    
+    // Generate AI response using OpenRouter
+    const openRouterKey = process.env.OPENROUTER_API_KEY;
+    if (!openRouterKey) {
+      return res.status(500).json({ error: 'AI service not configured' });
+    }
+    
+    const systemPrompt = `You are ${chatbot.name}, a helpful assistant for ${chatbot.clients.name}.
+Business Info: ${JSON.stringify(chatbot.knowledge_base.business_info)}
+Personality: ${JSON.stringify(chatbot.personality)}
+
+Respond professionally and helpfully. If asked about things outside your knowledge, politely redirect to contacting the business directly.`;
+    
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${openRouterKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://bowerycreativeagency.com',
+        'X-Title': 'Mission Control Chatbot'
+      },
+      body: JSON.stringify({
+        model: 'anthropic/claude-3.5-sonnet',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: message }
+        ],
+        temperature: 0.7,
+        max_tokens: 500
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error('AI service error');
+    }
+    
+    const aiResult = await response.json();
+    const aiMessage = aiResult.choices[0].message.content;
+    
+    // Save conversation
+    let conversationId = conversation_id;
+    if (!conversationId) {
+      const { data: newConv } = await supabase
+        .from('chatbot_conversations')
+        .insert({
+          chatbot_id: chatbot.id,
+          visitor_id,
+          messages: []
+        })
+        .select()
+        .single();
+      conversationId = newConv.id;
+    }
+    
+    // Update conversation with new messages
+    const { data: conversation } = await supabase
+      .from('chatbot_conversations')
+      .select('messages')
+      .eq('id', conversationId)
+      .single();
+    
+    const updatedMessages = [
+      ...(conversation.messages || []),
+      { role: 'user', content: message, timestamp: new Date().toISOString() },
+      { role: 'assistant', content: aiMessage, timestamp: new Date().toISOString() }
+    ];
+    
+    await supabase
+      .from('chatbot_conversations')
+      .update({ messages: updatedMessages })
+      .eq('id', conversationId);
+    
+    res.json({
+      message: aiMessage,
+      conversation_id: conversationId,
+      chatbot_name: chatbot.name
+    });
+    
+  } catch (error) {
+    console.error('Chatbot error:', error);
+    res.status(500).json({ error: 'Sorry, I am having trouble right now. Please try again later.' });
+  }
+});
+
+// Social Media Management Endpoints
+app.get('/api/social/accounts', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('social_accounts')
+      .select('*')
+      .eq('client_id', req.client.id);
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/social/accounts', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const accountData = {
+      ...req.body,
+      client_id: req.client.id
+    };
+    
+    const { data, error } = await supabase
+      .from('social_accounts')
+      .insert([accountData])
+      .select()
+      .single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Content Management Endpoints
+app.get('/api/content/calendar', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const { start_date, end_date, status } = req.query;
+    
+    let query = supabase
+      .from('content_calendar')
+      .select('*')
+      .eq('client_id', req.client.id);
+    
+    if (start_date) query = query.gte('scheduled_for', start_date);
+    if (end_date) query = query.lte('scheduled_for', end_date);
+    if (status) query = query.eq('status', status);
+    
+    const { data, error } = await query.order('scheduled_for');
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/content/calendar', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const contentData = {
+      ...req.body,
+      client_id: req.client.id
+    };
+    
+    const { data, error } = await supabase
+      .from('content_calendar')
+      .insert([contentData])
+      .select()
+      .single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Content Generation Endpoint
+app.post('/api/content/generate', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const { content_type, topic, platform, tone, length } = req.body;
+    
+    // Log usage
+    await supabase.from('usage_logs').insert({
+      client_id: req.client.id,
+      service_type: 'content',
+      action: 'content_generated',
+      quantity: 1,
+      metadata: { content_type, platform }
+    });
+    
+    const openRouterKey = process.env.OPENROUTER_API_KEY;
+    if (!openRouterKey) {
+      return res.status(500).json({ error: 'AI service not configured' });
+    }
+    
+    const clientInfo = req.client;
+    const systemPrompt = `You are a professional content creator for ${clientInfo.name}, a ${clientInfo.business_type} business.
+    
+Business Details:
+- Name: ${clientInfo.name}
+- Type: ${clientInfo.business_type}
+- Brand Voice: ${clientInfo.branding?.brand_voice || 'professional and trustworthy'}
+- Services: ${clientInfo.settings?.services?.join(', ') || 'various services'}
+
+Create ${content_type} content for ${platform} that is:
+- ${tone} in tone
+- ${length} in length
+- Engaging and relevant to the business
+- Includes relevant hashtags if appropriate
+- Professional but approachable`;
+    
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${openRouterKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://bowerycreativeagency.com',
+        'X-Title': 'Mission Control Content Generator'
+      },
+      body: JSON.stringify({
+        model: 'anthropic/claude-3.5-sonnet',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: `Create a ${content_type} about: ${topic}` }
+        ],
+        temperature: 0.8,
+        max_tokens: 1000
+      })
+    });
+    
+    if (!response.ok) {
+      throw new Error('AI service error');
+    }
+    
+    const aiResult = await response.json();
+    const generatedContent = aiResult.choices[0].message.content;
+    
+    res.json({
+      content: generatedContent,
+      content_type,
+      platform,
+      topic,
+      generated_at: new Date().toISOString()
+    });
+    
+  } catch (error) {
+    console.error('Content generation error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Usage Analytics Endpoint
+app.get('/api/usage/analytics', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const { service_type, start_date, end_date } = req.query;
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    
+    let query = supabase
+      .from('usage_logs')
+      .select('*')
+      .eq('client_id', req.client.id)
+      .gte('created_at', start_date || thirtyDaysAgo.toISOString());
+    
+    if (end_date) query = query.lte('created_at', end_date);
+    if (service_type) query = query.eq('service_type', service_type);
+    
+    const { data, error } = await query.order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    
+    // Aggregate usage by service
+    const usageByService = data.reduce((acc, log) => {
+      if (!acc[log.service_type]) {
+        acc[log.service_type] = { total: 0, cost_cents: 0 };
+      }
+      acc[log.service_type].total += log.quantity;
+      acc[log.service_type].cost_cents += log.cost_cents;
+      return acc;
+    }, {});
+    
+    res.json({
+      usage_by_service: usageByService,
+      total_usage: data.length,
+      raw_logs: data
+    });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
