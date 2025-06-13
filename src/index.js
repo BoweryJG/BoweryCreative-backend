@@ -29,23 +29,115 @@ const supabase = createClient(
 );
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: [
+    'https://bowerycreative.netlify.app',
+    'http://localhost:5173',
+    'http://localhost:3000'
+  ],
+  credentials: true
+}));
 app.use(express.json());
+
+// API Key authentication middleware
+const authenticateAPI = (req, res, next) => {
+  const apiKey = req.headers['x-api-key'];
+  if (process.env.API_KEY && apiKey !== process.env.API_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+};
 
 // Routes
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-// Get contact submissions (admin only)
-app.get('/api/contacts', async (req, res) => {
+// Create new contact (from contact form)
+app.post('/api/contacts', authenticateAPI, async (req, res) => {
   try {
-    // TODO: Add authentication check
+    const contactData = req.body;
+    
+    // Check for duplicate submissions in last 24 hours
+    const { data: existing } = await supabase
+      .from('contacts')
+      .select('id')
+      .eq('email', contactData.email)
+      .gte('created_at', new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString())
+      .limit(1);
+
+    if (existing && existing.length > 0) {
+      return res.status(409).json({ 
+        error: 'Duplicate submission',
+        message: 'Contact already exists' 
+      });
+    }
+
+    // Create contact
+    const { data, error } = await supabase
+      .from('contacts')
+      .insert([{
+        ...contactData,
+        created_at: new Date().toISOString()
+      }])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    console.error('Error creating contact:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get contact submissions (admin only)
+app.get('/api/contacts', authenticateAPI, async (req, res) => {
+  try {
+    const { status, leadScoreMin, assignedTo, tags } = req.query;
+    
+    let query = supabase.from('contacts').select('*');
+    
+    if (status) query = query.eq('status', status);
+    if (leadScoreMin) query = query.gte('lead_score', leadScoreMin);
+    if (assignedTo) query = query.eq('assigned_to', assignedTo);
+    if (tags) query = query.contains('tags', tags.split(','));
+    
+    const { data, error } = await query.order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get single contact
+app.get('/api/contacts/:id', authenticateAPI, async (req, res) => {
+  try {
     const { data, error } = await supabase
       .from('contacts')
       .select('*')
-      .order('created_at', { ascending: false });
+      .eq('id', req.params.id)
+      .single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
+// Update contact
+app.put('/api/contacts/:id', authenticateAPI, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('contacts')
+      .update(req.body)
+      .eq('id', req.params.id)
+      .select()
+      .single();
+    
     if (error) throw error;
     res.json(data);
   } catch (error) {
@@ -98,6 +190,166 @@ app.post('/api/analytics', async (req, res) => {
     if (error) throw error;
     res.json({ success: true });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Onboarding API
+app.post('/api/onboarding/start', authenticateAPI, async (req, res) => {
+  try {
+    const { contactId } = req.body;
+    
+    // Create project
+    const { data: project, error: projectError } = await supabase
+      .from('projects')
+      .insert([{
+        contact_id: contactId,
+        name: 'New Project',
+        status: 'lead',
+        created_at: new Date().toISOString()
+      }])
+      .select()
+      .single();
+    
+    if (projectError) throw projectError;
+    
+    // Create onboarding steps
+    const steps = [
+      { step_name: 'qualification', step_type: 'form', order_index: 0 },
+      { step_name: 'packages', step_type: 'form', order_index: 1 },
+      { step_name: 'proposal', step_type: 'document', order_index: 2 },
+      { step_name: 'contract', step_type: 'document', order_index: 3 },
+      { step_name: 'payment', step_type: 'payment', order_index: 4 },
+      { step_name: 'kickoff', step_type: 'meeting', order_index: 5 }
+    ];
+    
+    const onboardingSteps = steps.map(step => ({
+      contact_id: contactId,
+      project_id: project.id,
+      ...step,
+      status: 'not_started',
+      created_at: new Date().toISOString()
+    }));
+    
+    const { data: createdSteps, error: stepsError } = await supabase
+      .from('onboarding_steps')
+      .insert(onboardingSteps)
+      .select();
+    
+    if (stepsError) throw stepsError;
+    
+    res.json({ projectId: project.id, steps: createdSteps });
+  } catch (error) {
+    console.error('Error starting onboarding:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/onboarding/contacts/:contactId/steps', authenticateAPI, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('onboarding_steps')
+      .select('*')
+      .eq('contact_id', req.params.contactId)
+      .order('order_index');
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/onboarding/steps/:stepId/complete', authenticateAPI, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('onboarding_steps')
+      .update({
+        status: 'completed',
+        completed_at: new Date().toISOString(),
+        form_data: req.body
+      })
+      .eq('id', req.params.stepId)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Email API (using Resend when configured)
+app.post('/api/emails/send', authenticateAPI, async (req, res) => {
+  try {
+    const { templateId, to, variables } = req.body;
+    
+    // For now, just log the email request
+    console.log('Email request:', { templateId, to, variables });
+    
+    // When Resend is configured, add the actual sending logic here
+    if (process.env.RESEND_API_KEY) {
+      // TODO: Implement Resend email sending
+    }
+    
+    res.json({ success: true, messageId: `mock-${Date.now()}` });
+  } catch (error) {
+    console.error('Error sending email:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Service packages API
+app.get('/api/services/packages', authenticateAPI, async (req, res) => {
+  try {
+    const { category, isActive = true } = req.query;
+    
+    let query = supabase
+      .from('service_packages')
+      .select('*')
+      .eq('is_active', isActive === 'true');
+    
+    if (category) query = query.eq('category', category);
+    
+    const { data, error } = await query.order('display_order');
+    
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Analytics dashboard API
+app.get('/api/analytics/dashboard', authenticateAPI, async (req, res) => {
+  try {
+    // Total contacts
+    const { count: totalContacts } = await supabase
+      .from('contacts')
+      .select('*', { count: 'exact', head: true });
+    
+    // Active projects
+    const { count: activeProjects } = await supabase
+      .from('projects')
+      .select('*', { count: 'exact', head: true })
+      .in('status', ['in_progress', 'contract_signed']);
+    
+    // Simple metrics for now
+    res.json({
+      totalContacts: totalContacts || 0,
+      activeProjects: activeProjects || 0,
+      revenue: {
+        total: 0,
+        monthly: 0,
+        growth: 0
+      },
+      conversionRate: 0,
+      averageProjectValue: 0,
+      upcomingMilestones: []
+    });
+  } catch (error) {
+    console.error('Error fetching dashboard metrics:', error);
     res.status(500).json({ error: error.message });
   }
 });
