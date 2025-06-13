@@ -426,6 +426,23 @@ app.get('/api/agencies', authenticateAPI, async (req, res) => {
   }
 });
 
+app.post('/api/agencies', authenticateAPI, async (req, res) => {
+  try {
+    const agencyData = req.body;
+    
+    const { data, error } = await supabase
+      .from('agencies')
+      .insert([agencyData])
+      .select()
+      .single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/agencies/:id/clients', authenticateAPI, async (req, res) => {
   try {
     const { data, error } = await supabase
