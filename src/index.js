@@ -121,8 +121,15 @@ app.post('/api/feeds/rss', async (req, res) => {
       return res.json(cachedData);
     }
 
-    // Parse RSS feed
-    const feed = await parser.parseURL(feedUrl);
+    // Parse RSS feed with error handling
+    let feed;
+    try {
+      feed = await parser.parseURL(feedUrl);
+    } catch (parseError) {
+      console.warn(`Failed to parse RSS feed ${feedUrl}:`, parseError.message);
+      // Return empty array for invalid feeds instead of throwing error
+      return res.json([]);
+    }
     
     // Process episodes
     const episodes = feed.items.slice(0, maxEpisodes).map((item, index) => {
