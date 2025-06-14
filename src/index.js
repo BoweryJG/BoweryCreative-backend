@@ -307,20 +307,75 @@ app.post('/api/onboarding/steps/:stepId/complete', authenticateAPI, async (req, 
   }
 });
 
-// Email API (using Resend when configured)
+// Email API (using Resend)
 app.post('/api/emails/send', authenticateAPI, async (req, res) => {
   try {
-    const { templateId, to, variables } = req.body;
+    const { templateId, to, variables, from = 'noreply@bowerycreativeagency.com' } = req.body;
     
-    // For now, just log the email request
-    console.log('Email request:', { templateId, to, variables });
-    
-    // When Resend is configured, add the actual sending logic here
-    if (process.env.RESEND_API_KEY) {
-      // TODO: Implement Resend email sending
+    if (!process.env.RESEND_API_KEY) {
+      return res.status(500).json({ error: 'Email service not configured' });
     }
     
-    res.json({ success: true, messageId: `mock-${Date.now()}` });
+    // Get template from database
+    const { data: template, error: templateError } = await supabase
+      .from('email_templates')
+      .select('*')
+      .eq('id', templateId)
+      .single();
+    
+    if (templateError || !template) {
+      return res.status(404).json({ error: 'Email template not found' });
+    }
+    
+    // Replace variables in template
+    let htmlContent = template.html_content;
+    let textContent = template.text_content || '';
+    let subject = template.subject;
+    
+    Object.entries(variables || {}).forEach(([key, value]) => {
+      const regex = new RegExp(`{{${key}}}`, 'g');
+      htmlContent = htmlContent.replace(regex, value);
+      textContent = textContent.replace(regex, value);
+      subject = subject.replace(regex, value);
+    });
+    
+    // Send via Resend
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from,
+        to: Array.isArray(to) ? to : [to],
+        subject,
+        html: htmlContent,
+        text: textContent
+      })
+    });
+    
+    const data = await response.json();
+    
+    if (!response.ok) {
+      throw new Error(data.message || 'Failed to send email');
+    }
+    
+    // Log email sent
+    await supabase.from('communication_logs').insert({
+      type: 'email',
+      direction: 'outgoing',
+      subject,
+      content: htmlContent,
+      from_email: from,
+      to_email: Array.isArray(to) ? to[0] : to,
+      status: 'sent',
+      email_provider_id: data.id,
+      template_used: templateId,
+      is_automated: true
+    });
+    
+    res.json({ success: true, messageId: data.id });
   } catch (error) {
     console.error('Error sending email:', error);
     res.status(500).json({ error: error.message });
@@ -377,6 +432,205 @@ app.get('/api/analytics/dashboard', authenticateAPI, async (req, res) => {
     });
   } catch (error) {
     console.error('Error fetching dashboard metrics:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Email Campaign Endpoints
+app.get('/api/email/campaigns', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const { status, type } = req.query;
+    
+    let query = supabase
+      .from('email_campaigns')
+      .select('*')
+      .eq('client_id', req.client.id);
+    
+    if (status) query = query.eq('status', status);
+    if (type) query = query.eq('type', type);
+    
+    const { data, error } = await query.order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/email/campaigns', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const campaignData = {
+      ...req.body,
+      client_id: req.client.id,
+      status: 'draft'
+    };
+    
+    const { data, error } = await supabase
+      .from('email_campaigns')
+      .insert([campaignData])
+      .select()
+      .single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/email/campaigns/:id/send', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { test_email } = req.body;
+    
+    // Get campaign
+    const { data: campaign, error: campaignError } = await supabase
+      .from('email_campaigns')
+      .select('*')
+      .eq('id', id)
+      .eq('client_id', req.client.id)
+      .single();
+    
+    if (campaignError || !campaign) {
+      return res.status(404).json({ error: 'Campaign not found' });
+    }
+    
+    // Get recipients based on segment
+    let recipients = [];
+    if (test_email) {
+      recipients = [{ email: test_email, name: 'Test User' }];
+    } else {
+      const { data: contacts } = await supabase
+        .from('client_contacts')
+        .select('*')
+        .eq('client_id', req.client.id)
+        .eq('status', 'subscribed');
+      
+      recipients = contacts || [];
+    }
+    
+    // Send emails
+    const sendPromises = recipients.map(async (recipient) => {
+      const variables = {
+        recipient_name: recipient.name,
+        client_name: req.client.name,
+        unsubscribe_link: `https://bowerycreativeagency.com/unsubscribe?email=${recipient.email}`
+      };
+      
+      try {
+        const response = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            from: campaign.from_email || `${req.client.name} <noreply@bowerycreativeagency.com>`,
+            to: recipient.email,
+            subject: campaign.subject,
+            html: replaceVariables(campaign.html_content, variables),
+            text: replaceVariables(campaign.text_content || '', variables)
+          })
+        });
+        
+        const result = await response.json();
+        
+        // Log each email
+        await supabase.from('email_campaign_logs').insert({
+          campaign_id: campaign.id,
+          recipient_email: recipient.email,
+          status: response.ok ? 'sent' : 'failed',
+          message_id: result.id,
+          error: !response.ok ? result.message : null
+        });
+        
+        return { email: recipient.email, success: response.ok };
+      } catch (error) {
+        return { email: recipient.email, success: false, error: error.message };
+      }
+    });
+    
+    const results = await Promise.all(sendPromises);
+    const successCount = results.filter(r => r.success).length;
+    
+    // Update campaign status
+    if (!test_email) {
+      await supabase
+        .from('email_campaigns')
+        .update({
+          status: 'sent',
+          sent_at: new Date().toISOString(),
+          recipient_count: recipients.length,
+          success_count: successCount
+        })
+        .eq('id', campaign.id);
+    }
+    
+    // Log usage
+    await supabase.from('usage_logs').insert({
+      client_id: req.client.id,
+      service_type: 'email',
+      action: test_email ? 'test_email' : 'campaign_sent',
+      quantity: recipients.length,
+      metadata: { campaign_id: campaign.id }
+    });
+    
+    res.json({
+      success: true,
+      sent_count: successCount,
+      failed_count: results.length - successCount,
+      results: results
+    });
+    
+  } catch (error) {
+    console.error('Campaign send error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Helper function to replace variables
+function replaceVariables(content, variables) {
+  let result = content;
+  Object.entries(variables).forEach(([key, value]) => {
+    result = result.replace(new RegExp(`{{${key}}}`, 'g'), value);
+  });
+  return result;
+}
+
+// Email Templates
+app.get('/api/email/templates', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('email_templates')
+      .select('*')
+      .or(`client_id.eq.${req.client.id},is_global.eq.true`)
+      .order('created_at', { ascending: false });
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/email/templates', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const templateData = {
+      ...req.body,
+      client_id: req.client.id,
+      is_global: false
+    };
+    
+    const { data, error } = await supabase
+      .from('email_templates')
+      .insert([templateData])
+      .select()
+      .single();
+    
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
@@ -817,6 +1071,137 @@ Create ${content_type} content for ${platform} that is:
     
   } catch (error) {
     console.error('Content generation error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// SEO Analysis Endpoints
+app.post('/api/seo/analyze', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const { website, location, keywords } = req.body;
+    
+    // Log usage
+    await supabase.from('usage_logs').insert({
+      client_id: req.client.id,
+      service_type: 'seo',
+      action: 'analysis_generated',
+      quantity: 1,
+      metadata: { website, location }
+    });
+    
+    // In production, this would call various SEO APIs
+    // For now, return mock data
+    const analysis = {
+      overall_score: 72,
+      metrics: {
+        google_my_business: { score: 85, status: 'optimized' },
+        local_citations: { score: 65, found: 45, total_possible: 80 },
+        reviews: { score: 92, rating: 4.8, count: 127 },
+        page_speed: { score: 58, load_time: 3.2 },
+        mobile_optimization: { score: 78, status: 'responsive' },
+        schema_markup: { score: 45, status: 'partial' }
+      },
+      recommendations: [
+        {
+          priority: 'high',
+          category: 'technical',
+          issue: 'Missing Medical Business Schema',
+          impact: 'High visibility impact',
+          solution: 'Add structured data markup for medical businesses'
+        },
+        {
+          priority: 'medium',
+          category: 'local',
+          issue: 'Incomplete Local Citations',
+          impact: 'Reduced local visibility',
+          solution: 'Submit to 35 additional local directories'
+        }
+      ]
+    };
+    
+    res.json(analysis);
+  } catch (error) {
+    console.error('SEO analysis error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/seo/competitors', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const { location, category, radius = 2 } = req.body;
+    
+    // Use Brave Search API to find local competitors
+    const braveApiKey = process.env.BRAVE_API_KEY;
+    
+    if (braveApiKey) {
+      const searchQuery = `${category} near ${location}`;
+      const response = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(searchQuery)}&count=20`, {
+        headers: {
+          'Accept': 'application/json',
+          'X-Subscription-Token': braveApiKey
+        }
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        // Process and return competitor data
+        const competitors = data.results?.slice(0, 10).map((result, index) => ({
+          name: result.title,
+          url: result.url,
+          description: result.description,
+          ranking: index + 1
+        })) || [];
+        
+        return res.json({ competitors });
+      }
+    }
+    
+    // Return mock data if no API key
+    const mockCompetitors = [
+      {
+        name: 'HealthFirst Medical Center',
+        address: '123 Main St',
+        rating: 4.6,
+        reviews: 234,
+        distance: '0.5 mi',
+        website: 'healthfirstmed.com',
+        ranking: 1
+      },
+      {
+        name: 'City Care Physicians',
+        address: '456 Broadway',
+        rating: 4.7,
+        reviews: 189,
+        distance: '0.8 mi',
+        website: 'citycarephysicians.com',
+        ranking: 2
+      }
+    ];
+    
+    res.json({ competitors: mockCompetitors });
+  } catch (error) {
+    console.error('Competitor analysis error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/seo/keywords', authenticateAPI, getClientContext, async (req, res) => {
+  try {
+    const { keywords, location } = req.body;
+    const keywordList = keywords.split(',').map(k => k.trim());
+    
+    // In production, this would use keyword research APIs
+    const keywordData = keywordList.map(keyword => ({
+      keyword: `${keyword} ${location}`,
+      volume: Math.floor(Math.random() * 3000) + 500,
+      difficulty: Math.floor(Math.random() * 100),
+      cpc: (Math.random() * 5 + 1).toFixed(2),
+      trend: Math.random() > 0.5 ? 'up' : 'stable'
+    }));
+    
+    res.json({ keywords: keywordData });
+  } catch (error) {
+    console.error('Keyword research error:', error);
     res.status(500).json({ error: error.message });
   }
 });
