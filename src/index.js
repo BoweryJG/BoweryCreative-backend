@@ -58,8 +58,11 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 // Middleware
 app.use(cors({
   origin: [
+    'https://bowerycreativeagency.com',
+    'https://www.bowerycreativeagency.com',
     'https://bowerycreative.netlify.app',
     'http://localhost:5173',
+    'http://localhost:5174',
     'http://localhost:3000'
   ],
   credentials: true
