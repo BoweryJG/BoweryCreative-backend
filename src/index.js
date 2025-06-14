@@ -436,6 +436,36 @@ app.get('/api/analytics/dashboard', authenticateAPI, async (req, res) => {
   }
 });
 
+// ======= MISSION CONTROL MULTI-TENANT API ENDPOINTS =======
+
+// Multi-tenant middleware - extracts client_id from header or query
+const getClientContext = async (req, res, next) => {
+  try {
+    const clientId = req.headers['x-client-id'] || req.query.client_id;
+    
+    if (!clientId) {
+      return res.status(400).json({ error: 'Client ID is required' });
+    }
+    
+    // Verify client exists and is active
+    const { data: client, error } = await supabase
+      .from('clients')
+      .select('*, agencies(*)')
+      .eq('id', clientId)
+      .eq('status', 'active')
+      .single();
+    
+    if (error || !client) {
+      return res.status(404).json({ error: 'Client not found or inactive' });
+    }
+    
+    req.client = client;
+    next();
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+};
+
 // Email Campaign Endpoints
 app.get('/api/email/campaigns', authenticateAPI, getClientContext, async (req, res) => {
   try {
@@ -634,36 +664,6 @@ app.post('/api/email/templates', authenticateAPI, getClientContext, async (req, 
     res.status(500).json({ error: error.message });
   }
 });
-
-// ======= MISSION CONTROL MULTI-TENANT API ENDPOINTS =======
-
-// Multi-tenant middleware - extracts client_id from header or query
-const getClientContext = async (req, res, next) => {
-  try {
-    const clientId = req.headers['x-client-id'] || req.query.client_id;
-    
-    if (!clientId) {
-      return res.status(400).json({ error: 'Client ID is required' });
-    }
-    
-    // Verify client exists and is active
-    const { data: client, error } = await supabase
-      .from('clients')
-      .select('*, agencies(*)')
-      .eq('id', clientId)
-      .eq('status', 'active')
-      .single();
-    
-    if (error || !client) {
-      return res.status(404).json({ error: 'Client not found or inactive' });
-    }
-    
-    req.client = client;
-    next();
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-};
 
 // Agency Management Endpoints
 app.get('/api/agencies', authenticateAPI, async (req, res) => {
