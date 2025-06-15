@@ -5,6 +5,7 @@ import axios from 'axios';
 import Parser from 'rss-parser';
 import NodeCache from 'node-cache';
 import { createClient } from '@supabase/supabase-js';
+import emailRoutes from './routes/email.js';
 
 dotenv.config();
 
@@ -82,6 +83,9 @@ const authenticateAPI = (req, res, next) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
+
+// Email routes
+app.use('/api/emails', emailRoutes);
 
 // Create new contact (from contact form)
 app.post('/api/contacts', authenticateAPI, async (req, res) => {

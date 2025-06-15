@@ -1,0 +1,48 @@
+version: '3'
+
+services:
+  postal-mariadb:
+    image: mariadb:10
+    container_name: postal-mariadb
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: BoweryRoot2024
+      MYSQL_DATABASE: postal
+      MYSQL_USER: postal
+      MYSQL_PASSWORD: BoweryPostal2024
+    volumes:
+      - ./postal/mysql:/var/lib/mysql
+
+  postal-rabbitmq:
+    image: rabbitmq:3-alpine
+    container_name: postal-rabbitmq
+    restart: always
+    environment:
+      RABBITMQ_DEFAULT_USER: postal
+      RABBITMQ_DEFAULT_PASS: BoweryRabbit2024
+      RABBITMQ_DEFAULT_VHOST: postal
+
+  postal:
+    image: postalserver/postal:latest
+    container_name: postal
+    restart: always
+    ports:
+      - "5000:5000"  # Web UI
+      - "25:25"      # SMTP
+    depends_on:
+      - postal-mariadb
+      - postal-rabbitmq
+    volumes:
+      - ./postal/config:/opt/postal/config
+      - ./postal/app:/opt/postal/app
+    environment:
+      POSTAL_FNAME: Bowery
+      POSTAL_LNAME: Creative
+      POSTAL_EMAIL: admin@bowerycreativeagency.com
+      POSTAL_USERNAME: admin
+      POSTAL_PASSWORD: BoweryCreative2024!
+    command: bash -c "sleep 30 && postal initialize && postal start"
+
+networks:
+  default:
+    name: postal-network
