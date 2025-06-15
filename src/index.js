@@ -6,6 +6,8 @@ import Parser from 'rss-parser';
 import NodeCache from 'node-cache';
 import { createClient } from '@supabase/supabase-js';
 import emailRoutes from './routes/email.js';
+import campaignRoutes from './routes/campaigns.js';
+import purchaseRoutes from './routes/purchases.js';
 
 dotenv.config();
 
@@ -86,6 +88,10 @@ app.get('/health', (req, res) => {
 
 // Email routes
 app.use('/api/emails', emailRoutes);
+
+// Campaign and purchase routes
+app.use('/api/campaigns', campaignRoutes);
+app.use('/api/purchases', purchaseRoutes);
 
 // Create new contact (from contact form)
 app.post('/api/contacts', authenticateAPI, async (req, res) => {
